@@ -803,6 +803,16 @@ function ErrorDecoder({ ex, selected, setSelected, answered, onAnswer }) {
 /* ═══════════════════════════════════════════
    TYPE 10: TERMINAL SIMULATOR ✨ NEW
    ═══════════════════════════════════════════ */
+/* Typed answers are compared on shape, not on bytes. The input is trimmed
+   before it reaches here, so an expected line carrying indentation could never
+   match — the Python FizzBuzz challenge was unclearable for that reason alone.
+   Whitespace is dropped and quote style unified, so name = 'Otter' and
+   name="Otter" both count, and spacing around operators stops mattering.
+   Both sides go through the same normalisation, so nothing else loosens. */
+function _normaliseCommand(s) {
+    return (s || '').replace(/\s+/g, '').replace(/'/g, '"')
+}
+
 function TerminalSim({ ex, answered, onAnswer }) {
     const [history, setHistory] = useState(ex.terminalHistory || [])
     const [currentInput, setCurrentInput] = useState('')
@@ -819,7 +829,7 @@ function TerminalSim({ ex, answered, onAnswer }) {
         haptic()
         const cmd = currentInput.trim()
         const expected = ex.expectedCommands[cmdIndex]
-        const isMatch = cmd === expected
+        const isMatch = _normaliseCommand(cmd) === _normaliseCommand(expected)
 
         setHistory(prev => [...prev,
         { type: 'input', text: cmd },
