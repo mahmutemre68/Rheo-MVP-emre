@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -112,7 +113,16 @@ class NotificationService {
     if (!kIsWeb) {
       try {
         tzdata.initializeTimeZones();
-        tz.setLocalLocation(tz.local);
+        // tz.setLocalLocation(tz.local) was a no-op: tz.local IS UTC until
+        // something sets it, so every reminder was scheduled in UTC. A learner
+        // in Istanbul asking for 20:00 would have been woken at 23:00. Ask the
+        // device for its IANA zone and use that.
+        try {
+          final name = await FlutterTimezone.getLocalTimezone();
+          tz.setLocalLocation(tz.getLocation(name));
+        } catch (e) {
+          debugPrint('NotificationService timezone lookup failed: $e');
+        }
         await _plugin.initialize(
           const InitializationSettings(
             android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -134,7 +144,9 @@ class NotificationService {
 
     _isInitialized = true;
     // Re-queue on every launch: this is what keeps the rolling horizon full.
-    if (_isEnabled) await _reschedule();
+    // setEnabled re-verifies, so a permission revoked in Settings since the
+    // last run flips our own switch off rather than lying about it.
+    if (_isEnabled) await setEnabled(true);
   }
 
   /// Ask the OS for permission. Returns whether reminders are now on.
@@ -175,10 +187,22 @@ class NotificationService {
     } catch (e) {
       debugPrint('NotificationService save error: $e');
     }
-    if (enabled) {
-      await _reschedule();
-    } else {
+    if (!enabled) {
       await cancelAll();
+      return;
+    }
+    // Verify rather than assume. If the OS queued nothing — almost always
+    // because notifications are not authorised — the switch must go back to
+    // off instead of telling the learner reminders are on.
+    final queued = await _reschedule();
+    if (queued == 0) {
+      _isEnabled = false;
+      try {
+        await _box?.put(_notifEnabledKey, false);
+      } catch (e) {
+        debugPrint('NotificationService save error: $e');
+      }
+      debugPrint('NotificationService: nothing scheduled, reverting to off');
     }
   }
 
@@ -196,8 +220,11 @@ class NotificationService {
   }
 
   /// Queue the next [_horizonDays] reminders, each with its own message.
-  Future<void> _reschedule() async {
-    if (!_pluginReady) return;
+  /// Returns how many the OS is actually holding afterwards — iOS silently
+  /// drops scheduling requests from an app the user has not authorised, so
+  /// "no exception" is not evidence that anything was scheduled.
+  Future<int> _reschedule() async {
+    if (!_pluginReady) return 0;
     try {
       await _cancelScheduled();
       for (var day = 0; day < _horizonDays; day++) {
@@ -214,6 +241,12 @@ class NotificationService {
       }
     } catch (e) {
       debugPrint('NotificationService schedule error: $e');
+    }
+    try {
+      return (await _plugin.pendingNotificationRequests()).length;
+    } catch (e) {
+      debugPrint('NotificationService pending check failed: $e');
+      return 0;
     }
   }
 
@@ -253,6 +286,21 @@ class NotificationService {
 
   /// Check if notifications are enabled
   bool get isEnabled => _isEnabled;
+
+  /// How many reminders the OS is currently holding. 0 means none will arrive,
+  /// whatever the switch says.
+  Future<int> scheduledCount() async {
+    if (!_pluginReady) return 0;
+    try {
+      return (await _plugin.pendingNotificationRequests()).length;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /// The zone reminders are scheduled in — UTC would mean the timezone lookup
+  /// failed and every reminder is offset by the learner's UTC offset.
+  String get timezoneName => tz.local.name;
 
   /// Get reminder hour
   int get hour => _hour;
